@@ -1,0 +1,200 @@
+---
+title: "Summarize results of spatial blocking"
+author: "Eric Ward"
+date: "5/30/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+```
+
+```{r}
+library(glmmfields)
+library(blockCV)
+library(tidyverse)
+library(sdmTMB)
+library(ggplot2)
+```
+
+Note: sdmTMB reports the objective function as the NLL -- but it's flipped here to just be the log-likelihood
+
+```{r}
+# drop cases where CV is random wrt space, but range is != 5000
+df = readRDS(df, file="sims/example_2/grid.rds")
+df$cv = dplyr::recode(df$cv, random='random block',systematic = 'systematic block',
+  none = 'random')
+
+# 
+df$LL = df$est_int = df$est_cov = df$est_tau_O = df$est_kappa = NA
+
+for(i in 1:nrow(df)) {
+
+if(file.exists(paste0("sims/example_2/normal_pred_",i,".rds"))) {
+# load log-likelihood, only retaining saved models
+ll = readRDS(file = paste0("sims/example_2/normal_pred_",i,".rds"))
+load(file=paste0("sims/example_2/normal_coefs_",i,".Rdata"))
+
+if(sum(unlist(lapply(fit_model, getElement, 3)))==0) {
+  #df$LL[i] = sum(dbinom(ll$y01, size=1, prob=plogis(ll$pred_cv),log=TRUE))
+  load(file=paste0("sims/example_2/normal_coefs_",i,".Rdata"))
+  df$LL[i] = mean(unlist(lapply(fit_model,getElement,2)))
+  load(file=paste0("sims/example_2/normal_coefs_",i,".Rdata"))
+  df$est_int[i] = mean(unlist(lapply(coef_est,getElement,1)))
+  indx = 0
+  if(df$oper_model[i]=="covariate") {
+    df$est_cov[i] = mean(unlist(lapply(coef_est,getElement,2)))
+    indx = 1
+  }
+  df$est_tau_O[i] = mean(exp(unlist(lapply(coef_est,getElement,indx+1))))
+  df$est_kappa[i] = mean(exp(unlist(lapply(coef_est,getElement,indx+2))))
+}
+
+}
+}
+
+# flip the NLL -> LL
+df$LL = -df$LL
+```
+
+First we'll look at holding the range (for spatial resampling) and kappa (defining spatial autocorrelation in the data) and look at how the choice of spatial sampling affects the likelihood. The operating model is a null model (no covariate effests) and estimation model includes covariate effects. This shows little difference between the models, and a lot of variation.
+
+```{r}
+# first, how much does swithing from random to systematic or random sampling affect LL?
+df_1 = dplyr::filter(df, range==unique(df$range)[2],kappa==2,
+  oper_model == "null",est_model=="covariate") %>%
+  dplyr::group_by(sim) %>% 
+  dplyr::mutate(ll_none = LL[which(cv=="random")],
+    cov_none = est_cov[which(cv=="random")]) %>% 
+  dplyr::group_by(sim, cv) %>%
+  dplyr::summarize(LL = LL, est_cov = est_cov, ll_diff = LL - ll_none,
+    cov_diff = est_cov - cov_none)
+ggplot(df_1, aes(cv, LL)) + geom_boxplot(fill="blue",alpha=0.3) + 
+  xlab("Cross - validation approach") + 
+  ylab(expression("LL"))
+```
+
+But that approach doesn't take the variability among datasets into account. Because we've resampled the same datasets, we can focus on a single dataset and look at how each of the block sampling approaches affects the log-likelihood relative to the model that uses random cross-validation (not taking spatial autocorrelation into account). This shows that the LL is largely unaffected with the systematic approach -- but the LL using 'random block' sampling in blockCV results in higher likelihoods relative to the random approach (difference is negative).
+
+```{r}
+# first, how much does swithing from random to systematic or random sampling affect LL?
+df_1 = dplyr::filter(df, range==unique(df$range)[2],kappa==2,
+  oper_model == "null",est_model=="covariate") %>%
+  dplyr::group_by(sim) %>% 
+  dplyr::mutate(ll_none = LL[which(cv=="random")],
+    cov_none = est_cov[which(cv=="random")]) %>% 
+  dplyr::group_by(sim, cv) %>%
+  dplyr::summarize(ll = LL - ll_none,
+    cov = est_cov - cov_none) %>% 
+  dplyr::filter(cv!="random")
+ggplot(df_1, aes(cv, ll)) + geom_boxplot(fill="blue",alpha=0.3) + 
+  xlab("Cross - validation approach") + 
+  ylab(expression(paste('LL'[random~CV],' - ','LL'[block~CV])))
+```
+
+But because the NLL is on a relative scale, what also matters though is how the difference in likelihoods between this model compares to a simpler model (say a null model fit to the same data, but not including an estimated covariate effect). Using the null model with random cross-validation as a base effect, we can calculate the difference in likelihoods between this base model and various combinations of estimation models and sampling approaches. 
+
+This shows that the systematic block sampling has a little bit higher difference for the covariate model (meaning more support for the covariate model over the null), while the random block sampling shifts down slightly (meaning the covariate model would be favored less). Though the null model with random block sampling also shifts negative. 
+
+```{r}
+# first, how much does swithing from random to systematic or random sampling affect LL?
+df_1 = dplyr::filter(df, range==unique(df$range)[2],kappa==2,
+  oper_model == "null") %>%
+  dplyr::group_by(sim) %>% 
+  dplyr::mutate(ll_base = LL[which(cv=="random" & est_model=="null")]) %>% 
+  group_by(sim,cv,est_model) %>% 
+  dplyr::summarize(ll_diff = LL - ll_base)
+
+ggplot(df_1, aes(cv,ll_diff,group=paste(cv,est_model),col=est_model)) + geom_boxplot(outlier.shape = NA) + 
+  ylab("LL - LL[random CV, null model]")
+
+```
+
+Given these shifts, it also seems useful to remake this plot using the null model for each sampling approach as the base or reference case, and look at the relative support between the two models. 
+
+```{r}
+# first, how much does swithing from random to systematic or random sampling affect LL?
+df_1 = dplyr::filter(df, range==unique(df$range)[2],kappa==2,
+  oper_model == "null")
+df_1$base = NA
+df_1$base[which(df_1$cv=="random block" & df_1$est_model=="null")] = df_1$LL[which(df_1$cv=="random block" & df_1$est_model=="null")]
+df_1$base[which(df_1$cv=="random block" & df_1$est_model=="covariate")] = df_1$LL[which(df_1$cv=="random block" & df_1$est_model=="null")]
+df_1$base[which(df_1$cv=="systematic block" & df_1$est_model=="null")] = df_1$LL[which(df_1$cv=="systematic block" & df_1$est_model=="null")]
+df_1$base[which(df_1$cv=="systematic block" & df_1$est_model=="covariate")] = df_1$LL[which(df_1$cv=="systematic block" & df_1$est_model=="null")]
+df_1$base[which(df_1$cv=="random" & df_1$est_model=="null")] = df_1$LL[which(df_1$cv=="random" & df_1$est_model=="null")]
+df_1$base[which(df_1$cv=="random" & df_1$est_model=="covariate")] = df_1$LL[which(df_1$cv=="random" & df_1$est_model=="null")]
+
+df_1 = df_1 %>%
+  dplyr::group_by(sim,cv,est_model) %>% 
+  dplyr::summarize(ll_diff = LL - base)
+
+ggplot(df_1, aes(cv,ll_diff,group=paste(cv,est_model),col=est_model)) + geom_boxplot(outlier.shape = NA) + ylab("LL - LL[null model]") + ggtitle("Operating model: null")
+```
+
+Next, we can ask some of the same of the models that use the covariate model as the operating model. 
+```{r}
+# first, how much does swithing from random to systematic or random sampling affect LL?
+df_1 = dplyr::filter(df, range==unique(df$range)[2],kappa==2,
+  oper_model == "covariate")
+df_1$base = NA
+df_1$base[which(df_1$cv=="random block" & df_1$est_model=="null")] = df_1$LL[which(df_1$cv=="random block" & df_1$est_model=="null")]
+df_1$base[which(df_1$cv=="random block" & df_1$est_model=="covariate")] = df_1$LL[which(df_1$cv=="random block" & df_1$est_model=="null")]
+df_1$base[which(df_1$cv=="systematic block" & df_1$est_model=="null")] = df_1$LL[which(df_1$cv=="systematic block" & df_1$est_model=="null")]
+df_1$base[which(df_1$cv=="systematic block" & df_1$est_model=="covariate")] = df_1$LL[which(df_1$cv=="systematic block" & df_1$est_model=="null")]
+df_1$base[which(df_1$cv=="random" & df_1$est_model=="null")] = df_1$LL[which(df_1$cv=="random" & df_1$est_model=="null")]
+df_1$base[which(df_1$cv=="random" & df_1$est_model=="covariate")] = df_1$LL[which(df_1$cv=="random" & df_1$est_model=="null")]
+
+df_1 = df_1 %>%
+  dplyr::group_by(sim,cv,est_model) %>% 
+  dplyr::summarize(ll_diff = LL - base)
+
+ggplot(df_1, aes(cv,ll_diff,group=paste(cv,est_model),col=est_model)) + geom_boxplot(outlier.shape = NA) + 
+  ylab("LL - LL[null model]") + ggtitle("Operating model: covariate effects")
+
+```
+
+We can also look at the estimation of covariate effects. When the operating model includes covariate effects, are the estimates biased based on how sampling is done? 
+
+```{r}
+# first, how much does swithing from random to systematic or random sampling affect LL?
+df_1 = dplyr::filter(df, range==unique(df$range)[2],kappa==2,
+  oper_model == "covariate") %>%
+  dplyr::group_by(sim) %>% 
+  dplyr::mutate(cov_base = est_cov[which(cv=="random" & est_model=="covariate")]) %>% 
+  group_by(sim,cv,est_model) %>% 
+  dplyr::summarize(cov_diff = est_cov - cov_base)
+
+ggplot(dplyr::filter(df_1,cv!="random"), aes(cv,cov_diff,group=cv)) + geom_boxplot(outlier.shape = NA) + ylab("Cov - cov[random CV]")
+
+```
+
+
+```{r eval = FALSE}
+# first, how much does swithing from random to systematic or random sampling affect LL?
+df_1 = dplyr::filter(df, range==unique(df$range)[2],kappa==2,
+  oper_model == "covariate") %>%
+  dplyr::group_by(sim) %>% 
+  dplyr::mutate(ll_base = LL[which(cv=="random" & est_model=="null")]) %>% 
+  dplyr::group_by(sim, cv) %>%
+  dplyr::summarize(ll_cov = LL[which(est_model=="covariate")] - ll_base[which(est_model=="covariate")])
+df_1 = df_1 %>% group_by(sim) %>% dplyr::mutate(ll_base = ll_cov[which(cv=="random")]) %>% 
+  dplyr::filter(cv!="random")
+
+ggplot(df_1, aes(cv, ll_cov-ll_base)) + geom_boxplot(fill="blue",alpha=0.3,outlier.shape=NA) + 
+  xlab("Cross - validation approach")+ 
+  ylab("(NLL [covariate,nospatial] - NLL [null,nospatial]) -  (NLL [covariate,spatial] - NLL [null,spatial])")
+```
+
+```{r eval=FALSE}
+# first, how much does swithing from random to systematic or random sampling affect LL?
+df_1 = dplyr::filter(df, range==unique(df$range)[2],kappa==2,
+  oper_model == "covariate") %>%
+  dplyr::group_by(sim) %>% 
+  dplyr::mutate(ll_base = LL[which(cv=="random" & est_model=="null")]) %>% 
+  dplyr::group_by(sim, cv) %>%
+  dplyr::summarize(ll_cov = LL[which(est_model=="covariate")] - ll_base[which(est_model=="covariate")])
+
+ggplot(df_1, aes(cv, ll_cov)) + geom_boxplot(fill="blue",alpha=0.3,outlier.shape=NA) + 
+  xlab("Cross - validation approach") + ylim(-3,0.5) + 
+  ylab(expression(paste('NLL'[covariate],' - ','NLL'[null])))
+```
